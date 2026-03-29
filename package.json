@@ -1,0 +1,65 @@
+{
+  "name": "postgres-memory-server",
+  "version": "0.1.0",
+  "description": "spin up an actual/real postgres server programmatically from within nodejs, for testing or mocking during development",
+  "homepage": "https://github.com/amanthegreatone/postgres-memory-server#readme",
+  "bugs": {
+    "url": "https://github.com/amanthegreatone/postgres-memory-server/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/amanthegreatone/postgres-memory-server.git"
+  },
+  "type": "module",
+  "license": "MIT",
+  "author": "Aman Agarwal",
+  "keywords": [
+    "postgres",
+    "postgresql",
+    "testcontainers",
+    "testing",
+    "integration-testing",
+    "paradedb",
+    "pgvector",
+    "database",
+    "memory-server"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "bin": {
+    "postgres-memory-server": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "dev": "tsup --watch",
+    "prepack": "npm run build",
+    "test:paradedb": "npm run build && vitest run test/paradedb.test.ts examples/paradedb/hybrid-search.test.ts",
+    "test:postgres": "npm run build && vitest run test/basic.test.ts test/jest.test.ts test/presets.test.ts test/snapshot.test.ts examples/vitest/basic.test.ts",
+    "test": "npm run build && vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@testcontainers/postgresql": "^11.13.0",
+    "pg": "^8.20.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "@types/pg": "^8.20.0",
+    "tsup": "^8.5.1",
+    "typescript": "^6.0.2",
+    "vitest": "^4.1.2"
+  }
+}
