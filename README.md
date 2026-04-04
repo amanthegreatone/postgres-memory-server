@@ -2,7 +2,7 @@
 
 Spin up a disposable **real** PostgreSQL or ParadeDB instance in tests with a tiny API inspired by `mongodb-memory-server` and `redisjson-memory-server`.
 
-This package does **not** emulate Postgres. It starts an actual database container and gives you a normal Postgres connection string.
+This package does **not** emulate Postgres. It starts an actual PostgreSQL process using native binaries — **no Docker required**.
 
 ## Why this exists
 
@@ -11,28 +11,33 @@ For Postgres extension-heavy workloads, especially ParadeDB + `pgvector`, a real
 - no shared local database contamination
 - deterministic integration tests
 - realistic extension behavior
-- straightforward CI/CD setup
+- straightforward CI/CD setup — no Docker daemon needed
 - one API for plain Postgres and ParadeDB
 
 ## Features
 
-- Start a disposable Postgres container with `create()`
+- Start a disposable Postgres instance with `create()` — no Docker
+- PostgreSQL binaries bundled via [`embedded-postgres`](https://github.com/leinelissen/embedded-postgres)
+- ParadeDB `pg_search` and `pgvector` extensions auto-downloaded from official releases
 - Get a ready-to-use connection string with `getUri()`
-- Use the same API for plain Postgres or ParadeDB presets
 - Run SQL strings, SQL files, or a migrations directory
 - Snapshot and restore database state between tests
+- Extension binaries cached in `~/.cache/postgres-memory-server/`
 - CLI for local scripts and debugging
 
 ## Requirements
 
 - Node.js 20+
-- Docker available to the current user
+
+That's it. No Docker, no system Postgres installation needed.
 
 ## Install
 
 ```bash
-npm install -D postgres-memory-server pg
+npm install -D postgres-memory-server
 ```
+
+The `pg` client library is included as a dependency.
 
 ## Quick start
 
@@ -69,28 +74,52 @@ await db.runSql(`
 await db.stop();
 ```
 
-By default, the ParadeDB preset uses the official ParadeDB image and runs:
+By default, the ParadeDB preset automatically downloads and installs the extensions, then runs:
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS pg_search;
 CREATE EXTENSION IF NOT EXISTS vector;
 ```
 
-The default image is pinned to `paradedb/paradedb:0.22.3-pg17` so local runs and CI stay reproducible.
+Extension binaries are downloaded once and cached in `~/.cache/postgres-memory-server/`.
 
-If you want to test against a different Postgres or ParadeDB version, pass `version`. The package resolves the correct image repository for the selected preset.
+- `pg_search` is downloaded from [ParadeDB GitHub releases](https://github.com/paradedb/paradedb/releases)
+- `pgvector` is downloaded from [Homebrew bottles](https://formulae.brew.sh/formula/pgvector) (covers macOS + Linux)
 
-```ts
-const postgres16 = await PostgresMemoryServer.createPostgres({
-  version: "16",
-});
+## How it works
 
-const paradeDbPg16 = await PostgresMemoryServer.createParadeDb({
-  version: "0.22.3-pg16",
-});
+Instead of Docker containers, this package uses:
+
+1. **[embedded-postgres](https://github.com/leinelissen/embedded-postgres)** — bundles PostgreSQL binaries as npm packages (~10MB). The PostgreSQL version is determined by the installed `embedded-postgres` npm package version (e.g., `embedded-postgres@18.x` = PostgreSQL 18).
+
+2. **Native extension installation** — for the ParadeDB preset, `pg_search` and `pgvector` extension binaries are downloaded from their official release channels, extracted, and installed into the embedded PostgreSQL directory.
+
+3. **Template database snapshots** — `snapshot()` and `restore()` use PostgreSQL's native `CREATE DATABASE ... TEMPLATE` for fast, zero-copy test isolation.
+
+### PostgreSQL version
+
+The PostgreSQL version is tied to the `embedded-postgres` npm package version. To use a specific PG version:
+
+```bash
+# PG 18 (default with latest embedded-postgres)
+npm install -D embedded-postgres
+
+# PG 17
+npm install -D embedded-postgres@17.9.0-beta.16
+
+# PG 16
+npm install -D embedded-postgres@16.8.0-beta.16
 ```
 
-Use `image` when you want an exact override, such as a private registry, a custom build, or a nonstandard tag. When both `version` and `image` are provided, `image` wins.
+### Platform support
+
+| Platform | Postgres | ParadeDB pg_search | pgvector |
+|----------|----------|--------------------|----------|
+| macOS arm64 (Apple Silicon) | Yes | Yes | Yes |
+| macOS x64 (Intel) | Yes | No | Yes |
+| Linux x64 | Yes | Yes | Yes |
+| Linux arm64 | Yes | Yes | Yes |
+| Windows x64 | Yes | No | No |
 
 ## API
 
@@ -100,7 +129,6 @@ Create a disposable Postgres instance.
 
 ```ts
 const db = await PostgresMemoryServer.create({
-  version: "17",
   database: "testdb",
   username: "testuser",
   password: "testpassword",
@@ -112,22 +140,28 @@ const db = await PostgresMemoryServer.create({
 Convenience alias for the plain Postgres preset.
 
 ```ts
-const db = await PostgresMemoryServer.createPostgres({
-  version: "15",
-});
+const db = await PostgresMemoryServer.createPostgres();
 ```
 
 ### `PostgresMemoryServer.createParadeDb(options?)`
 
-Starts a ParadeDB container and creates the default extensions.
+Starts a Postgres instance with ParadeDB extensions (pg_search + pgvector).
 
 ```ts
-const db = await PostgresMemoryServer.createParadeDb({
-  version: "0.22.3-pg17",
-});
+const db = await PostgresMemoryServer.createParadeDb();
 ```
 
-The preset still controls the default extensions. Overriding `version` or `image` only changes which container tag is started.
+### Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `preset` | `"postgres" \| "paradedb"` | `"postgres"` | Controls default extensions |
+| `version` | `string` | — | ParadeDB extension version (e.g., `"0.22.5"`) |
+| `database` | `string` | `"testdb"` | Database name |
+| `username` | `string` | `"testuser"` | Username |
+| `password` | `string` | `"testpassword"` | Password |
+| `extensions` | `string[]` | preset default | Extensions to create |
+| `initSql` | `string[]` | `[]` | SQL statements to run after setup |
 
 ### `createJestGlobalSetup(options?)`
 
@@ -139,20 +173,22 @@ Stops the process started by `createJestGlobalSetup()`.
 
 ### Instance methods
 
-- `getUri()`
-- `getHost()`
-- `getPort()`
+- `getUri()` — connection string (`postgres://...`)
+- `getHost()` — always `localhost`
+- `getPort()` — randomly assigned free port
 - `getDatabase()`
 - `getUsername()`
 - `getPassword()`
-- `getConnectionOptions()`
-- `query(text, params?)`
-- `runSql(sql)`
-- `runSqlFile(filePath)`
-- `runMigrationsDir(dirPath)`
-- `snapshot()`
-- `restore()`
-- `stop()`
+- `getConnectionOptions()` — `{ host, port, database, user, password }`
+- `getImage()` — descriptive label (e.g., `"postgres:18"`)
+- `query(text, params?)` — execute a query and return rows
+- `withClient(callback)` — direct access to a `pg.Client`
+- `runSql(sql)` — execute one or more SQL statements
+- `runSqlFile(filePath)` — execute SQL from a file
+- `runMigrationsDir(dirPath)` — run `.sql` files in lexicographic order
+- `snapshot()` — create a restore point
+- `restore()` — restore to last snapshot
+- `stop()` — shut down the PostgreSQL process
 
 ## Snapshots
 
@@ -176,7 +212,7 @@ const result = await db.query<{ count: string }>(
 console.log(result.rows[0]?.count); // 1
 ```
 
-Use a non-system database name when you plan to use snapshots. The package defaults to `testdb` for that reason.
+Snapshots use PostgreSQL template databases under the hood. Use a non-system database name (the default `testdb` works).
 
 ## Running SQL files or migrations
 
@@ -193,34 +229,24 @@ Migration files are run in lexicographic order.
 npx postgres-memory-server --preset paradedb
 ```
 
-To test a specific version from the CLI, pass `--version`:
-
-```bash
-npx postgres-memory-server --preset postgres --version 16
-npx postgres-memory-server --preset paradedb --version 0.22.3-pg16
-```
-
-If you need an exact image reference instead, `--image` still works and takes precedence over `--version`.
-
 Example output:
 
 ```bash
-POSTGRES_MEMORY_SERVER_URI=postgres://testuser:testpassword@127.0.0.1:54329/testdb
-POSTGRES_MEMORY_SERVER_HOST=127.0.0.1
+POSTGRES_MEMORY_SERVER_URI=postgres://testuser:testpassword@localhost:54329/testdb
+POSTGRES_MEMORY_SERVER_HOST=localhost
 POSTGRES_MEMORY_SERVER_PORT=54329
 POSTGRES_MEMORY_SERVER_DATABASE=testdb
 POSTGRES_MEMORY_SERVER_USERNAME=testuser
 POSTGRES_MEMORY_SERVER_PASSWORD=testpassword
-```
 
-The CLI keeps the container alive until you exit with `Ctrl+C`.
+Press Ctrl+C to stop the server.
+```
 
 ### CLI flags
 
 ```bash
 --preset postgres|paradedb
 --version <tag>
---image <image>
 --database <name>
 --username <name>
 --password <password>
@@ -228,15 +254,6 @@ The CLI keeps the container alive until you exit with `Ctrl+C`.
 --init-file <path>      # repeatable
 --json
 ```
-
-## Test scripts
-
-```bash
-npm run test:postgres
-npm run test:paradedb
-```
-
-These scripts are useful locally and are also what the GitHub Actions workflow uses.
 
 ## Jest global setup
 
@@ -246,7 +263,6 @@ import { createJestGlobalSetup } from "postgres-memory-server";
 
 export default createJestGlobalSetup({
   preset: "paradedb",
-  version: "0.22.3-pg16",
 });
 ```
 
@@ -310,29 +326,38 @@ describe("db", () => {
 });
 ```
 
+## Migrating from v0.1.0 (Docker-based)
+
+v0.2.0 replaces Docker containers with native binaries. Key changes:
+
+| v0.1.0 | v0.2.0 |
+|--------|--------|
+| Requires Docker daemon | No Docker needed |
+| `@testcontainers/postgresql` | `embedded-postgres` |
+| PG version via `version` option | PG version via `embedded-postgres` npm version |
+| `image` option for Docker images | `image` option deprecated (ignored) |
+| Container snapshots | Template database snapshots |
+
+**Breaking changes:**
+- The `image` option is deprecated and ignored. Remove it from your code.
+- The `version` option for the `postgres` preset is ignored — install the desired `embedded-postgres@<version>` package instead.
+- The `version` option for the `paradedb` preset now refers to the ParadeDB extension version (e.g., `"0.22.5"`), not the Docker image tag.
+
+**No changes needed if** you only used `create()`, `createPostgres()`, or `createParadeDb()` with just `database`, `username`, `password`, or `extensions` options.
+
 ## Caveats
 
-- This package depends on Docker. It is intentionally built around a real database, not an emulator.
-- Snapshot and restore require no active client connections during those operations.
-- The ParadeDB preset creates extensions in the target database, but you are still responsible for your schema, indexes, and test data.
-- The package is ESM-only in this starter repo. If you need CJS, add a second build target.
+- The PostgreSQL version is determined by the installed `embedded-postgres` npm package, not by a runtime option.
+- ParadeDB `pg_search` requires macOS arm64 or Linux. Intel Macs and Windows are not supported for ParadeDB.
+- Snapshot and restore terminate other connections to the database during the operation.
+- The package is ESM-only.
 
-## Publishing checklist
+## Test scripts
 
-Before publishing:
-
-1. update the package name in `package.json` if you plan to publish under a scope
-2. update repository URLs in `package.json`
-3. run `npm install`
-4. run `npm test`
-5. publish with `npm publish --access public`
-
-## Roadmap
-
-- reusable container mode
-- worker-isolated databases
-- Docker Compose / Podman engine adapters
-- optional non-Docker backend
+```bash
+npm run test:postgres
+npm run test:paradedb
+```
 
 ## License
 

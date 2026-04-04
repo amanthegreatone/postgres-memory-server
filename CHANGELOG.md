@@ -4,6 +4,32 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [0.2.0] - 2026-04-05
+
+### Changed
+
+- **Breaking:** Replaced Docker containers with native PostgreSQL binaries via `embedded-postgres`. Docker is no longer required.
+- **Breaking:** The `image` option is deprecated and ignored. The PostgreSQL version is now determined by the installed `embedded-postgres` npm package version.
+- **Breaking:** The `version` option for the `postgres` preset is ignored. Install the desired `embedded-postgres@<version>` package instead.
+- **Breaking:** The `version` option for the `paradedb` preset now refers to the ParadeDB extension version (e.g., `"0.22.5"`), not the Docker image tag.
+- Snapshot and restore now use PostgreSQL template databases instead of Docker container snapshots.
+- Replaced `@testcontainers/postgresql` dependency with `embedded-postgres`.
+
+### Added
+
+- Native binary PostgreSQL server — no Docker daemon needed.
+- Automatic download and caching of ParadeDB `pg_search` extension from GitHub releases.
+- Automatic download and caching of `pgvector` extension from Homebrew bottles (macOS + Linux).
+- Extension binary cache at `~/.cache/postgres-memory-server/` to avoid re-downloading.
+- Platform support table: macOS arm64/x64, Linux x64/arm64, Windows x64 (Postgres only).
+- `ExtensionInstallError` error class for extension download/install failures.
+- Migration guide in README for upgrading from v0.1.0.
+
+### Removed
+
+- Docker dependency (`@testcontainers/postgresql`).
+- Docker-specific `--image` CLI flag (kept for backward compatibility but ignored).
+
 ## [0.1.0] - 2026-03-29
 
 ### Added
@@ -20,4 +46,5 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Vitest and ParadeDB example coverage.
 - GitHub Actions CI split between plain Postgres and ParadeDB test suites.
 
+[0.2.0]: https://github.com/amanthegreatone/postgres-memory-server/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/amanthegreatone/postgres-memory-server/releases/tag/v0.1.0

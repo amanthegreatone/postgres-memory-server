@@ -42,7 +42,7 @@ async function main(): Promise<void> {
         `POSTGRES_MEMORY_SERVER_PASSWORD=${payload.password}\n`,
       );
       process.stdout.write(`POSTGRES_MEMORY_SERVER_IMAGE=${payload.image}\n`);
-      process.stdout.write("\nPress Ctrl+C to stop the container.\n");
+      process.stdout.write("\nPress Ctrl+C to stop the server.\n");
     }
 
     const stop = async () => {
@@ -61,7 +61,7 @@ async function main(): Promise<void> {
       // Intentionally never resolve. Signals will stop the process.
     });
   } catch (error) {
-    await server.stop();
+    await server.stop().catch(() => {});
     throw error;
   }
 }
@@ -92,7 +92,8 @@ function parseArgs(argv: string[]): ParsedArgs {
         break;
       }
       case "--image": {
-        options.image = readValue(argv, ++index, arg);
+        // Deprecated: Docker images are no longer used. Ignore silently.
+        readValue(argv, ++index, arg);
         break;
       }
       case "--version": {
@@ -153,7 +154,7 @@ function printHelp(): void {
   process.stdout.write(`Options:\n`);
   process.stdout.write(`  --preset postgres|paradedb\n`);
   process.stdout.write(`  --version <tag>\n`);
-  process.stdout.write(`  --image <image>\n`);
+  process.stdout.write(`  --image <image>         (deprecated, ignored)\n`);
   process.stdout.write(`  --database <name>\n`);
   process.stdout.write(`  --username <name>\n`);
   process.stdout.write(`  --password <password>\n`);

@@ -1,11 +1,27 @@
 import { promises as fs } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
-import { PostgreSqlContainer } from "@testcontainers/postgresql";
+import EmbeddedPostgres from "embedded-postgres";
 import { Client, type QueryResultRow } from "pg";
 
-import { ServerStoppedError, SnapshotUnsupportedError } from "./errors.js";
-import { buildInitStatements, normalizeOptions } from "./presets.js";
+import {
+  ExtensionInstallError,
+  ServerStoppedError,
+  SnapshotUnsupportedError,
+} from "./errors.js";
+import {
+  buildInitStatements,
+  normalizeOptions,
+  resolveParadeDBVersion,
+  DEFAULT_POSTGRES_VERSION,
+} from "./presets.js";
+import {
+  getFreePort,
+  getNativeDir,
+  installParadeDBExtension,
+  installPgVectorExtension,
+} from "./native.js";
 import type {
   PostgresConnectionOptions,
   PostgresMemoryServerOptions,
@@ -14,16 +30,15 @@ import type {
   QueryText,
 } from "./types.js";
 
-export type StartedPostgreSqlContainer = Awaited<
-  ReturnType<PostgreSqlContainer["start"]>
->;
-
 export class PostgresMemoryServer {
   private stopped = false;
   private readonly snapshotSupported: boolean;
+  private hasSnapshot = false;
 
   private constructor(
-    private readonly container: StartedPostgreSqlContainer,
+    private readonly pg: EmbeddedPostgres,
+    private readonly port: number,
+    private readonly dataDir: string,
     private readonly options: ReturnType<typeof normalizeOptions>,
   ) {
     this.snapshotSupported = options.database !== "postgres";
@@ -33,15 +48,74 @@ export class PostgresMemoryServer {
     options: PostgresMemoryServerOptions = {},
   ): Promise<PostgresMemoryServer> {
     const normalized = normalizeOptions(options);
+    const port = await getFreePort();
+    const dataDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), "postgres-memory-server-"),
+    );
 
-    const container = await new PostgreSqlContainer(normalized.image)
-      .withDatabase(normalized.database)
-      .withUsername(normalized.username)
-      .withPassword(normalized.password)
-      .start();
+    const postgresFlags: string[] = [];
 
-    const server = new PostgresMemoryServer(container, normalized);
+    // Install ParadeDB extension if needed
+    if (normalized.preset === "paradedb") {
+      const nativeDir = getNativeDir();
+      const extVersion = resolveParadeDBVersion(normalized.version);
+      const pgMajor = DEFAULT_POSTGRES_VERSION;
 
+      try {
+        await installParadeDBExtension(nativeDir, extVersion, pgMajor);
+      } catch (error) {
+        throw new ExtensionInstallError(
+          "pg_search",
+          error instanceof Error ? error : new Error(String(error)),
+        );
+      }
+
+      // Install pgvector if the vector extension is requested
+      if (normalized.extensions.includes("vector")) {
+        try {
+          await installPgVectorExtension(nativeDir, pgMajor);
+        } catch (error) {
+          throw new ExtensionInstallError(
+            "vector",
+            error instanceof Error ? error : new Error(String(error)),
+          );
+        }
+      }
+
+      // pg_search requires shared_preload_libraries for its background worker
+      if (
+        normalized.extensions.includes("pg_search") ||
+        normalized.extensions.length === 0
+      ) {
+        postgresFlags.push(
+          "-c",
+          "shared_preload_libraries=pg_search",
+        );
+      }
+    }
+
+    const pg = new EmbeddedPostgres({
+      databaseDir: dataDir,
+      port,
+      user: normalized.username,
+      password: normalized.password,
+      persistent: false,
+      postgresFlags,
+      onLog: () => {},
+      onError: () => {},
+    });
+
+    await pg.initialise();
+    await pg.start();
+
+    // Create the user database if it's not the system database
+    if (normalized.database !== "postgres") {
+      await pg.createDatabase(normalized.database);
+    }
+
+    const server = new PostgresMemoryServer(pg, port, dataDir, normalized);
+
+    // Run init statements (CREATE EXTENSION, custom SQL)
     const initStatements = buildInitStatements(normalized);
     if (initStatements.length > 0) {
       await server.runSql(initStatements);
@@ -64,17 +138,17 @@ export class PostgresMemoryServer {
 
   getUri(): string {
     this.ensureRunning();
-    return this.container.getConnectionUri();
+    return `postgres://${this.options.username}:${this.options.password}@localhost:${this.port}/${this.options.database}`;
   }
 
   getHost(): string {
     this.ensureRunning();
-    return this.container.getHost();
+    return "localhost";
   }
 
   getPort(): number {
     this.ensureRunning();
-    return this.container.getPort();
+    return this.port;
   }
 
   getDatabase(): string {
@@ -166,16 +240,66 @@ export class PostgresMemoryServer {
     return files;
   }
 
+  /**
+   * Create a snapshot of the current database state.
+   * Uses PostgreSQL template databases for fast, native snapshots.
+   */
   async snapshot(): Promise<void> {
     this.ensureRunning();
     this.ensureSnapshotSupported();
-    await this.container.snapshot();
+
+    const snapshotDb = `${this.options.database}_snapshot`;
+
+    await this.withAdminClient(async (client) => {
+      // Terminate other connections to the database
+      await client.query(
+        `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid != pg_backend_pid()`,
+        [this.options.database],
+      );
+
+      // Drop existing snapshot if any
+      if (this.hasSnapshot) {
+        await client.query(`DROP DATABASE IF EXISTS "${snapshotDb}"`);
+      }
+
+      // Create snapshot as a template copy
+      await client.query(
+        `CREATE DATABASE "${snapshotDb}" TEMPLATE "${this.options.database}"`,
+      );
+    });
+
+    this.hasSnapshot = true;
   }
 
+  /**
+   * Restore the database to the last snapshot.
+   * Drops and recreates the database from the snapshot template.
+   */
   async restore(): Promise<void> {
     this.ensureRunning();
     this.ensureSnapshotSupported();
-    await this.container.restoreSnapshot();
+
+    if (!this.hasSnapshot) {
+      throw new Error(
+        "No snapshot exists. Call snapshot() before calling restore().",
+      );
+    }
+
+    const snapshotDb = `${this.options.database}_snapshot`;
+
+    await this.withAdminClient(async (client) => {
+      // Terminate all connections to the target database
+      await client.query(
+        `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid != pg_backend_pid()`,
+        [this.options.database],
+      );
+
+      // Drop and recreate from snapshot
+      await client.query(`DROP DATABASE "${this.options.database}"`);
+      await client.query(
+        `CREATE DATABASE "${this.options.database}" TEMPLATE "${snapshotDb}"`,
+      );
+    });
   }
 
   async stop(): Promise<void> {
@@ -184,7 +308,30 @@ export class PostgresMemoryServer {
     }
 
     this.stopped = true;
-    await this.container.stop();
+    await this.pg.stop();
+  }
+
+  /**
+   * Connect to the "postgres" system database for admin operations
+   * (snapshot, restore, etc.).
+   */
+  private async withAdminClient<T>(
+    callback: (client: Client) => Promise<T>,
+  ): Promise<T> {
+    const client = new Client({
+      host: "localhost",
+      port: this.port,
+      database: "postgres",
+      user: this.options.username,
+      password: this.options.password,
+    });
+
+    await client.connect();
+    try {
+      return await callback(client);
+    } finally {
+      await client.end();
+    }
   }
 
   private ensureRunning(): void {

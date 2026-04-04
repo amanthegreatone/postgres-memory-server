@@ -19,3 +19,12 @@ export class ServerStoppedError extends PostgresMemoryServerError {
     super("The PostgresMemoryServer has already been stopped.");
   }
 }
+
+export class ExtensionInstallError extends PostgresMemoryServerError {
+  constructor(extensionName: string, cause?: Error) {
+    super(
+      `Failed to install the "${extensionName}" extension. ${cause?.message ?? ""}`.trim(),
+      cause ? { cause } : undefined,
+    );
+  }
+}

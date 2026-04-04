@@ -10,6 +10,7 @@ export {
   DEFAULT_PARADEDB_IMAGE,
   DEFAULT_POSTGRES_VERSION,
   DEFAULT_POSTGRES_IMAGE,
+  DEFAULT_PARADEDB_EXT_VERSION,
   PARADEDB_IMAGE_REPOSITORY,
   POSTGRES_IMAGE_REPOSITORY,
   buildInitStatements,
@@ -19,6 +20,7 @@ export {
   normalizeOptions,
 } from "./presets.js";
 export {
+  ExtensionInstallError,
   PostgresMemoryServerError,
   ServerStoppedError,
   SnapshotUnsupportedError,

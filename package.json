@@ -1,6 +1,6 @@
 {
   "name": "postgres-memory-server",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "spin up an actual/real postgres server programmatically from within nodejs, for testing or mocking during development",
   "homepage": "https://github.com/amanthegreatone/postgres-memory-server#readme",
   "bugs": {
@@ -16,13 +16,14 @@
   "keywords": [
     "postgres",
     "postgresql",
-    "testcontainers",
+    "embedded-postgres",
     "testing",
     "integration-testing",
     "paradedb",
     "pgvector",
     "database",
-    "memory-server"
+    "memory-server",
+    "no-docker"
   ],
   "engines": {
     "node": ">=20"
@@ -52,7 +53,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@testcontainers/postgresql": "^11.13.0",
+    "embedded-postgres": "^18.3.0-beta.16",
     "pg": "^8.20.0"
   },
   "devDependencies": {
