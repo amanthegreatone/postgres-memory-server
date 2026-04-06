@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [0.2.1] - 2026-04-06
+
+### Fixed
+
+- Data directories under `$TMPDIR/postgres-memory-server-*` were leaking on disk when:
+  - the test process was hard-killed (SIGKILL, timeouts) before `stop()` could run,
+  - `create()` threw partway through (extension install or `pg.start()` failure), or
+  - the underlying `embedded-postgres` `stop()` early-returned because its `process` field was unset.
+- `stop()` now always removes the data directory, even when `pg.stop()` fails or never started.
+- `create()` now wraps initialization in a try/catch that removes the data directory and stops any partially started postgres process before rethrowing.
+- Registered `SIGINT`/`SIGTERM`/`SIGHUP`/`exit` handlers that synchronously remove all live instances' data directories on process exit. After cleanup, the original signal is re-raised so existing handlers and exit codes are preserved.
+- The first `create()` call in a process now sweeps `$TMPDIR` for orphaned `postgres-memory-server-*` directories from crashed prior runs, identified by missing or stale `postmaster.pid` files. Live directories from concurrent test processes are left untouched.
+
 ## [0.2.0] - 2026-04-05
 
 ### Changed
@@ -46,5 +59,6 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Vitest and ParadeDB example coverage.
 - GitHub Actions CI split between plain Postgres and ParadeDB test suites.
 
+[0.2.1]: https://github.com/amanthegreatone/postgres-memory-server/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/amanthegreatone/postgres-memory-server/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/amanthegreatone/postgres-memory-server/releases/tag/v0.1.0

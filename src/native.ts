@@ -39,7 +39,8 @@ export function getPgMajorVersion(): string {
       const content = readFileSync(candidate, "utf8");
       const pkg = JSON.parse(content) as { name?: string; version?: string };
       if (pkg.name === "embedded-postgres" && pkg.version) {
-        return pkg.version.split(".")[0];
+        const major = pkg.version.split(".")[0];
+        if (major) return major;
       }
     } catch {
       // continue walking up
@@ -247,7 +248,7 @@ function buildDownloadUrl(
 
 function getMacOSCodename(): string {
   const release = os.release();
-  const majorVersion = parseInt(release.split(".")[0], 10);
+  const majorVersion = parseInt(release.split(".")[0] ?? "0", 10);
 
   if (majorVersion >= 24) return "sequoia";
   if (majorVersion >= 23) return "sonoma";
@@ -478,7 +479,7 @@ export async function installPgVectorExtension(
 function getHomebrewBottleTag(platform: string, arch: string): string {
   if (platform === "darwin") {
     const release = os.release();
-    const major = parseInt(release.split(".")[0], 10);
+    const major = parseInt(release.split(".")[0] ?? "0", 10);
     const prefix = arch === "arm64" ? "arm64_" : "";
     if (major >= 25) return `${prefix}tahoe`;
     if (major >= 24) return `${prefix}sequoia`;
@@ -500,6 +501,71 @@ interface HomebrewFormula {
 }
 
 /**
+ * Sweep $TMPDIR for orphaned `postgres-memory-server-*` data directories
+ * left behind by previous processes that crashed or were hard-killed.
+ *
+ * A directory is considered orphaned if:
+ *   - it has no `postmaster.pid` file (init never finished), OR
+ *   - the PID inside `postmaster.pid` no longer maps to a live process.
+ *
+ * Live directories from concurrently running test processes are left alone.
+ */
+export async function sweepOrphanedDataDirs(): Promise<void> {
+  const tmpDir = os.tmpdir();
+  let entries: string[];
+  try {
+    entries = await fs.readdir(tmpDir);
+  } catch {
+    return;
+  }
+
+  await Promise.all(
+    entries
+      .filter((name) => name.startsWith("postgres-memory-server-"))
+      .map(async (name) => {
+        const fullPath = path.join(tmpDir, name);
+        try {
+          const stat = await fs.stat(fullPath);
+          if (!stat.isDirectory()) return;
+        } catch {
+          return;
+        }
+
+        const pidFile = path.join(fullPath, "postmaster.pid");
+        let pid: number | null = null;
+        try {
+          const content = await fs.readFile(pidFile, "utf8");
+          const firstLine = content.split("\n")[0]?.trim();
+          const parsed = firstLine ? parseInt(firstLine, 10) : NaN;
+          if (!Number.isNaN(parsed) && parsed > 0) {
+            pid = parsed;
+          }
+        } catch {
+          // No pid file — partial init that never finished. Safe to remove.
+        }
+
+        if (pid !== null) {
+          try {
+            // Signal 0 just checks whether the process exists.
+            process.kill(pid, 0);
+            // Process is alive — leave it alone.
+            return;
+          } catch (err) {
+            const code = (err as NodeJS.ErrnoException).code;
+            if (code === "EPERM") {
+              // Process exists but belongs to another user — leave it alone.
+              return;
+            }
+            // ESRCH or anything else means the process is dead.
+          }
+        }
+
+        await fs.rm(fullPath, { recursive: true, force: true }).catch(() => {});
+      }),
+  );
+}
+
+/**
  * Parse a ParadeDB version string like "0.22.5" or "0.22.5-pg17".
  * Returns the extension version and optional PG version suffix.
  */
@@ -508,7 +574,7 @@ export function parseParadeDBVersion(version: string): {
   pgVersion?: string;
 } {
   const match = version.match(/^(\d+\.\d+\.\d+)(?:-pg(\d+))?$/);
-  if (!match) {
+  if (!match || !match[1]) {
     return { extVersion: version };
   }
   return {

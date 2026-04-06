@@ -1,6 +1,6 @@
 {
   "name": "postgres-memory-server",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "spin up an actual/real postgres server programmatically from within nodejs, for testing or mocking during development",
   "homepage": "https://github.com/amanthegreatone/postgres-memory-server#readme",
   "bugs": {

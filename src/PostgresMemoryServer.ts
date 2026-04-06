@@ -1,6 +1,7 @@
-import { promises as fs } from "node:fs";
+import { promises as fs, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import process from "node:process";
 
 import EmbeddedPostgres from "embedded-postgres";
 import { Client, type QueryResultRow } from "pg";
@@ -21,6 +22,7 @@ import {
   getNativeDir,
   installParadeDBExtension,
   installPgVectorExtension,
+  sweepOrphanedDataDirs,
 } from "./native.js";
 import type {
   PostgresConnectionOptions,
@@ -29,6 +31,40 @@ import type {
   QueryResponse,
   QueryText,
 } from "./types.js";
+
+// Track all live instances so we can clean up their dataDirs on process exit.
+const liveInstances = new Set<PostgresMemoryServer>();
+let exitHandlersRegistered = false;
+let orphanSweepDone = false;
+
+function registerExitHandlers(): void {
+  if (exitHandlersRegistered) return;
+  exitHandlersRegistered = true;
+
+  const cleanup = () => {
+    for (const instance of liveInstances) {
+      try {
+        instance._cleanupSync();
+      } catch {
+        // best-effort
+      }
+    }
+  };
+
+  process.once("exit", cleanup);
+
+  // For SIGINT/SIGTERM/uncaughtException we run cleanup then re-raise so
+  // we don't override existing handlers' decisions about whether to exit.
+  const signalCleanup = (signal: NodeJS.Signals) => {
+    cleanup();
+    // Remove our handler so a re-raise of the signal terminates normally.
+    process.removeListener(signal, signalCleanup);
+    process.kill(process.pid, signal);
+  };
+  process.on("SIGINT", signalCleanup);
+  process.on("SIGTERM", signalCleanup);
+  process.on("SIGHUP", signalCleanup);
+}
 
 export class PostgresMemoryServer {
   private stopped = false;
@@ -47,81 +83,101 @@ export class PostgresMemoryServer {
   static async create(
     options: PostgresMemoryServerOptions = {},
   ): Promise<PostgresMemoryServer> {
+    // One-time sweep of orphaned data dirs from prior crashed runs.
+    if (!orphanSweepDone) {
+      orphanSweepDone = true;
+      await sweepOrphanedDataDirs().catch(() => {
+        // best-effort cleanup
+      });
+    }
+
     const normalized = normalizeOptions(options);
     const port = await getFreePort();
     const dataDir = await fs.mkdtemp(
       path.join(os.tmpdir(), "postgres-memory-server-"),
     );
 
-    const postgresFlags: string[] = [];
+    let pg: EmbeddedPostgres | undefined;
 
-    // Install ParadeDB extension if needed
-    if (normalized.preset === "paradedb") {
-      const nativeDir = getNativeDir();
-      const extVersion = resolveParadeDBVersion(normalized.version);
-      const pgMajor = DEFAULT_POSTGRES_VERSION;
+    try {
+      const postgresFlags: string[] = [];
 
-      try {
-        await installParadeDBExtension(nativeDir, extVersion, pgMajor);
-      } catch (error) {
-        throw new ExtensionInstallError(
-          "pg_search",
-          error instanceof Error ? error : new Error(String(error)),
-        );
-      }
+      // Install ParadeDB extension if needed
+      if (normalized.preset === "paradedb") {
+        const nativeDir = getNativeDir();
+        const extVersion = resolveParadeDBVersion(normalized.version);
+        const pgMajor = DEFAULT_POSTGRES_VERSION;
 
-      // Install pgvector if the vector extension is requested
-      if (normalized.extensions.includes("vector")) {
         try {
-          await installPgVectorExtension(nativeDir, pgMajor);
+          await installParadeDBExtension(nativeDir, extVersion, pgMajor);
         } catch (error) {
           throw new ExtensionInstallError(
-            "vector",
+            "pg_search",
             error instanceof Error ? error : new Error(String(error)),
           );
         }
+
+        if (normalized.extensions.includes("vector")) {
+          try {
+            await installPgVectorExtension(nativeDir, pgMajor);
+          } catch (error) {
+            throw new ExtensionInstallError(
+              "vector",
+              error instanceof Error ? error : new Error(String(error)),
+            );
+          }
+        }
+
+        if (
+          normalized.extensions.includes("pg_search") ||
+          normalized.extensions.length === 0
+        ) {
+          postgresFlags.push("-c", "shared_preload_libraries=pg_search");
+        }
       }
 
-      // pg_search requires shared_preload_libraries for its background worker
-      if (
-        normalized.extensions.includes("pg_search") ||
-        normalized.extensions.length === 0
-      ) {
-        postgresFlags.push(
-          "-c",
-          "shared_preload_libraries=pg_search",
-        );
+      pg = new EmbeddedPostgres({
+        databaseDir: dataDir,
+        port,
+        user: normalized.username,
+        password: normalized.password,
+        persistent: false,
+        postgresFlags,
+        onLog: () => {},
+        onError: () => {},
+      });
+
+      await pg.initialise();
+      await pg.start();
+
+      if (normalized.database !== "postgres") {
+        await pg.createDatabase(normalized.database);
       }
+
+      const server = new PostgresMemoryServer(pg, port, dataDir, normalized);
+      liveInstances.add(server);
+      registerExitHandlers();
+
+      const initStatements = buildInitStatements(normalized);
+      if (initStatements.length > 0) {
+        await server.runSql(initStatements);
+      }
+
+      return server;
+    } catch (error) {
+      // Cleanup on failure: stop any partial postgres process and rm dataDir.
+      if (pg) {
+        try {
+          await pg.stop();
+        } catch {
+          // best-effort
+        }
+      }
+      await fs
+        .rm(dataDir, { recursive: true, force: true })
+        .catch(() => {});
+      throw error;
     }
-
-    const pg = new EmbeddedPostgres({
-      databaseDir: dataDir,
-      port,
-      user: normalized.username,
-      password: normalized.password,
-      persistent: false,
-      postgresFlags,
-      onLog: () => {},
-      onError: () => {},
-    });
-
-    await pg.initialise();
-    await pg.start();
-
-    // Create the user database if it's not the system database
-    if (normalized.database !== "postgres") {
-      await pg.createDatabase(normalized.database);
-    }
-
-    const server = new PostgresMemoryServer(pg, port, dataDir, normalized);
-
-    // Run init statements (CREATE EXTENSION, custom SQL)
-    const initStatements = buildInitStatements(normalized);
-    if (initStatements.length > 0) {
-      await server.runSql(initStatements);
-    }
-
-    return server;
   }
 
   static createPostgres(
@@ -308,7 +364,42 @@ export class PostgresMemoryServer {
     }
 
     this.stopped = true;
-    await this.pg.stop();
+    liveInstances.delete(this);
+
+    try {
+      await this.pg.stop();
+    } catch {
+      // Even if pg.stop() fails (e.g., process never started, already dead),
+      // we still want to remove the data directory below.
+    }
+
+    // Defensive cleanup. embedded-postgres only deletes the data dir when
+    // its `process` field is set; if start() failed before that, the dir
+    // would be leaked. force: true makes this a no-op if already gone.
+    await fs
+      .rm(this.dataDir, { recursive: true, force: true })
+      .catch(() => {});
+  }
+
+  /**
+   * Synchronous cleanup for use in process exit handlers. Cannot await,
+   * so we just remove the data directory and let the OS reap the postgres
+   * child process. embedded-postgres registers its own exit hook to kill
+   * the process; this method is a backup for the data directory only.
+   *
+   * @internal
+   */
+  _cleanupSync(): void {
+    if (this.stopped) {
+      return;
+    }
+    this.stopped = true;
+    liveInstances.delete(this);
+    try {
+      rmSync(this.dataDir, { recursive: true, force: true });
+    } catch {
+      // best-effort
+    }
   }
 
   /**
