@@ -6,6 +6,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [0.2.1] - 2026-04-06
 
+### Added
+
+- `PostgresMemoryServer.getDataDir()` returns the absolute path to the temporary PostgreSQL data directory. Useful for debugging and for tests that want to assert cleanup behavior.
+- Test coverage for all data-directory cleanup paths: graceful `stop()`, `create()` failure, orphan sweep (stale pid, partial init, fresh races, live process), and SIGINT exit handler.
+
 ### Fixed
 
 - Data directories under `$TMPDIR/postgres-memory-server-*` were leaking on disk when:
@@ -15,7 +20,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - `stop()` now always removes the data directory, even when `pg.stop()` fails or never started.
 - `create()` now wraps initialization in a try/catch that removes the data directory and stops any partially started postgres process before rethrowing.
 - Registered `SIGINT`/`SIGTERM`/`SIGHUP`/`exit` handlers that synchronously remove all live instances' data directories on process exit. After cleanup, the original signal is re-raised so existing handlers and exit codes are preserved.
-- The first `create()` call in a process now sweeps `$TMPDIR` for orphaned `postgres-memory-server-*` directories from crashed prior runs, identified by missing or stale `postmaster.pid` files. Live directories from concurrent test processes are left untouched.
+- The first `create()` call in a process now sweeps `$TMPDIR` for orphaned `postgres-memory-server-*` directories from crashed prior runs, identified by missing or stale `postmaster.pid` files. Live directories whose `postmaster.pid` points to a running process are always preserved, and dirs without a `postmaster.pid` file must be at least 60 seconds old before the sweep removes them — this protects concurrent test forks that have just `mkdtemp`'d a directory but have not yet finished `initdb`.
 
 ## [0.2.0] - 2026-04-05
 

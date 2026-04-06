@@ -501,16 +501,29 @@ interface HomebrewFormula {
 }
 
 /**
+ * Minimum age (ms) a directory must have before the orphan sweep will
+ * consider deleting it. This avoids racing with concurrent test processes
+ * that have just created their data dir but have not yet started postgres
+ * (so no postmaster.pid file exists yet).
+ */
+const ORPHAN_MIN_AGE_MS = 60_000;
+
+/**
  * Sweep $TMPDIR for orphaned `postgres-memory-server-*` data directories
  * left behind by previous processes that crashed or were hard-killed.
  *
  * A directory is considered orphaned if:
+ *   - it is at least `minAgeMs` old, AND
  *   - it has no `postmaster.pid` file (init never finished), OR
  *   - the PID inside `postmaster.pid` no longer maps to a live process.
  *
- * Live directories from concurrently running test processes are left alone.
+ * The age check protects concurrent test processes that are mid-init.
+ * Live directories whose postmaster.pid points to a running process are
+ * always left alone, regardless of age.
  */
-export async function sweepOrphanedDataDirs(): Promise<void> {
+export async function sweepOrphanedDataDirs(
+  minAgeMs: number = ORPHAN_MIN_AGE_MS,
+): Promise<void> {
   const tmpDir = os.tmpdir();
   let entries: string[];
   try {
@@ -519,13 +532,16 @@ export async function sweepOrphanedDataDirs(): Promise<void> {
     return;
   }
 
+  const cutoff = Date.now() - minAgeMs;
+
   await Promise.all(
     entries
       .filter((name) => name.startsWith("postgres-memory-server-"))
       .map(async (name) => {
         const fullPath = path.join(tmpDir, name);
+        let stat: import("node:fs").Stats;
         try {
-          const stat = await fs.stat(fullPath);
+          stat = await fs.stat(fullPath);
           if (!stat.isDirectory()) return;
         } catch {
           return;
@@ -533,22 +549,24 @@ export async function sweepOrphanedDataDirs(): Promise<void> {
 
         const pidFile = path.join(fullPath, "postmaster.pid");
         let pid: number | null = null;
+        let pidFileExists = false;
         try {
           const content = await fs.readFile(pidFile, "utf8");
+          pidFileExists = true;
           const firstLine = content.split("\n")[0]?.trim();
           const parsed = firstLine ? parseInt(firstLine, 10) : NaN;
           if (!Number.isNaN(parsed) && parsed > 0) {
             pid = parsed;
           }
         } catch {
-          // No pid file — partial init that never finished. Safe to remove.
+          // No pid file
         }
 
         if (pid !== null) {
           try {
             // Signal 0 just checks whether the process exists.
             process.kill(pid, 0);
-            // Process is alive — leave it alone.
+            // Process is alive — leave it alone, regardless of age.
             return;
           } catch (err) {
             const code = (err as NodeJS.ErrnoException).code;
@@ -558,6 +576,13 @@ export async function sweepOrphanedDataDirs(): Promise<void> {
             }
             // ESRCH or anything else means the process is dead.
           }
+        }
+
+        // No live PID. Apply the age check before deleting to avoid
+        // racing with a concurrent test that just mkdtemp'd this dir
+        // and has not yet finished initdb.
+        if (!pidFileExists && stat.mtimeMs > cutoff) {
+          return;
         }
 
         await fs.rm(fullPath, { recursive: true, force: true }).catch(() => {});

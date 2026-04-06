@@ -223,6 +223,15 @@ export class PostgresMemoryServer {
     return this.options.image;
   }
 
+  /**
+   * Returns the absolute path to the temporary PostgreSQL data directory
+   * for this instance. Useful for debugging or backing up state. The
+   * directory is automatically removed by `stop()`.
+   */
+  getDataDir(): string {
+    return this.dataDir;
+  }
+
   getConnectionOptions(): PostgresConnectionOptions {
     return {
       host: this.getHost(),
