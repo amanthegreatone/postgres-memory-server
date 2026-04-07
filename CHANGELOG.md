@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [0.2.2] - 2026-04-07
+
+### Fixed
+
+- Apple Silicon (darwin-arm64): worked around a bug in `@embedded-postgres/darwin-arm64@18.3.0-beta.16` that ships every Mach-O file (3 binaries, 112 libraries and extensions) as a universal binary containing both `x86_64` and `arm64` slices. On affected Macs the universal `postgres` binary could hang indefinitely during `pg.start()`, manifesting as test suites stuck forever.
+
+### Added
+
+- `scripts/postinstall.cjs` runs automatically after `npm install`. On `darwin-arm64` it walks the installed `@embedded-postgres/darwin-arm64/native` tree, detects universal binaries, and thins them to `arm64` only using `lipo -thin arm64`. The script is a no-op on every other platform, on already-thin files, and on systems without `lipo`, and it never fails the install.
+- Opt-out via `POSTGRES_MEMORY_SERVER_SKIP_THIN=1` for cases where upstream ships fixed binaries and thinning becomes unnecessary.
+- Verbose logging via `POSTGRES_MEMORY_SERVER_THIN_VERBOSE=1` for debugging.
+
 ## [0.2.1] - 2026-04-06
 
 ### Added
@@ -64,6 +76,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Vitest and ParadeDB example coverage.
 - GitHub Actions CI split between plain Postgres and ParadeDB test suites.
 
+[0.2.2]: https://github.com/amanthegreatone/postgres-memory-server/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/amanthegreatone/postgres-memory-server/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/amanthegreatone/postgres-memory-server/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/amanthegreatone/postgres-memory-server/releases/tag/v0.1.0

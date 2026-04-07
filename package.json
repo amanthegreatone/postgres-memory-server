@@ -1,6 +1,6 @@
 {
   "name": "postgres-memory-server",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "spin up an actual/real postgres server programmatically from within nodejs, for testing or mocking during development",
   "homepage": "https://github.com/amanthegreatone/postgres-memory-server#readme",
   "bugs": {
@@ -30,6 +30,7 @@
   },
   "files": [
     "dist",
+    "scripts/postinstall.cjs",
     "README.md",
     "LICENSE"
   ],
@@ -46,6 +47,7 @@
     "build": "tsup",
     "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "dev": "tsup --watch",
+    "postinstall": "node scripts/postinstall.cjs",
     "prepack": "npm run build",
     "test:paradedb": "npm run build && vitest run test/paradedb.test.ts examples/paradedb/hybrid-search.test.ts",
     "test:postgres": "npm run build && vitest run test/basic.test.ts test/jest.test.ts test/presets.test.ts test/snapshot.test.ts examples/vitest/basic.test.ts",
