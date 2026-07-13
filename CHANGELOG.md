@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [0.3.0] - 2026-07-13
+
+### Fixed
+
+- Orphan sweep now reclaims **still-running** servers left behind by a crashed / OOM-killed / hard-killed (SIGKILL) run. Previously the sweep only removed data dirs whose `postmaster.pid` pointed to a *dead* process; a live orphaned postgres was left running and contended with the next run over CPU/memory, showing up as hangs or OOM kills. The sweep now reads a new `owner.pid` marker and kills an alive postgres only when its owning Node process is gone — a live owner (a genuine concurrent run) or a missing marker is still left strictly alone.
+
+### Added
+
+- `owner.pid` marker file written into each instance's data dir after `start()` (removed with the dir on `stop()`), recording the owning Node process PID so the orphan sweep can distinguish a crashed run from a live concurrent one.
+
 ## [0.2.2] - 2026-04-07
 
 ### Fixed

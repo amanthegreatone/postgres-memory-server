@@ -85,14 +85,53 @@ describe("data directory cleanup", () => {
 
   describe("orphan sweep", () => {
     const created: string[] = [];
+    const spawned: import("node:child_process").ChildProcess[] = [];
 
     afterEach(async () => {
+      // Kill any dummy "postmaster" processes we spawned.
+      while (spawned.length > 0) {
+        const c = spawned.pop()!;
+        try {
+          c.kill("SIGKILL");
+        } catch {
+          // already gone
+        }
+      }
       // Best-effort cleanup of any test artefacts left behind.
       while (created.length > 0) {
         const p = created.pop()!;
         await fs.rm(p, { recursive: true, force: true }).catch(() => {});
       }
     });
+
+    // A long-lived child process that stands in for an orphaned postmaster.
+    // Never use process.pid as the "postmaster" — the sweep would SIGKILL the
+    // test runner itself.
+    function spawnDummyPostmaster(): import("node:child_process").ChildProcess {
+      const c = spawn(process.execPath, ["-e", "setInterval(() => {}, 1e9)"], {
+        stdio: "ignore",
+      });
+      spawned.push(c);
+      return c;
+    }
+
+    function isRunning(c: import("node:child_process").ChildProcess): boolean {
+      return c.exitCode === null && c.signalCode === null;
+    }
+
+    function waitForExit(
+      c: import("node:child_process").ChildProcess,
+      timeoutMs = 5000,
+    ): Promise<boolean> {
+      if (!isRunning(c)) return Promise.resolve(true);
+      return new Promise((resolve) => {
+        const t = setTimeout(() => resolve(false), timeoutMs);
+        c.once("exit", () => {
+          clearTimeout(t);
+          resolve(true);
+        });
+      });
+    }
 
     it("removes a stale dir whose postmaster.pid points to a dead process", async () => {
       const orphan = await fs.mkdtemp(path.join(TMPDIR, `${PREFIX}stale-`));
@@ -147,6 +186,47 @@ describe("data directory cleanup", () => {
       await sweepOrphanedDataDirs(0);
 
       expect(await exists(orphan)).toBe(true);
+    });
+
+    it("reaps a live server whose owner process is dead (hard-killed run)", async () => {
+      const orphan = await fs.mkdtemp(path.join(TMPDIR, `${PREFIX}orphan-`));
+      created.push(orphan);
+      const postmaster = spawnDummyPostmaster();
+
+      // postmaster.pid points to a running process; owner.pid points to a dead
+      // one — i.e. the run that started it crashed / was hard-killed.
+      await fs.writeFile(
+        path.join(orphan, "postmaster.pid"),
+        `${postmaster.pid}\n/some/path\n12345\n`,
+        "utf8",
+      );
+      await fs.writeFile(path.join(orphan, "owner.pid"), "999999", "utf8");
+
+      await sweepOrphanedDataDirs(0);
+
+      // The orphaned postmaster is killed and its data dir reclaimed.
+      expect(await waitForExit(postmaster)).toBe(true);
+      expect(await exists(orphan)).toBe(false);
+    });
+
+    it("preserves a live server whose owner process is alive (concurrent run)", async () => {
+      const orphan = await fs.mkdtemp(path.join(TMPDIR, `${PREFIX}concurrent-`));
+      created.push(orphan);
+      const postmaster = spawnDummyPostmaster();
+
+      // Both the postmaster and its owner (this test runner) are alive — a
+      // genuine concurrent run that must not be disturbed.
+      await fs.writeFile(
+        path.join(orphan, "postmaster.pid"),
+        `${postmaster.pid}\n/some/path\n12345\n`,
+        "utf8",
+      );
+      await fs.writeFile(path.join(orphan, "owner.pid"), `${process.pid}`, "utf8");
+
+      await sweepOrphanedDataDirs(0);
+
+      expect(await exists(orphan)).toBe(true);
+      expect(isRunning(postmaster)).toBe(true);
     });
   });
 

@@ -509,6 +509,41 @@ interface HomebrewFormula {
 const ORPHAN_MIN_AGE_MS = 60_000;
 
 /**
+ * Name of the marker file written inside each data dir (after the server
+ * starts) recording the PID of the Node process that owns the instance.
+ *
+ * The orphan sweep uses it to tell a crashed / OOM-killed / hard-killed run
+ * (owner PID no longer alive) apart from a live concurrent run (owner PID still
+ * alive). It is written *after* `start()` so it never trips initdb's empty-dir
+ * requirement, and is removed together with the data dir when the instance
+ * stops (`persistent: false`), so no lifecycle bookkeeping is needed.
+ */
+export const OWNER_PID_FILE = "owner.pid";
+
+/** True if `pid` maps to a live process (EPERM ⇒ exists under another user). */
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/**
+ * Record the owning Node process PID inside a started instance's data dir.
+ * Best-effort — if it can't be written, the sweep just falls back to leaving a
+ * live server alone (the pre-existing, conservative behaviour).
+ */
+export async function writeOwnerPidFile(dataDir: string): Promise<void> {
+  try {
+    await fs.writeFile(path.join(dataDir, OWNER_PID_FILE), `${process.pid}`);
+  } catch {
+    // ignore — orphan reaping degrades gracefully to "leave alive alone"
+  }
+}
+
+/**
  * Sweep $TMPDIR for orphaned `postgres-memory-server-*` data directories
  * left behind by previous processes that crashed or were hard-killed.
  *
@@ -518,8 +553,14 @@ const ORPHAN_MIN_AGE_MS = 60_000;
  *   - the PID inside `postmaster.pid` no longer maps to a live process.
  *
  * The age check protects concurrent test processes that are mid-init.
- * Live directories whose postmaster.pid points to a running process are
- * always left alone, regardless of age.
+ *
+ * A directory whose postmaster.pid points to a *running* postgres is reclaimed
+ * only when its owning Node process (recorded in `owner.pid`) is no longer
+ * alive — i.e. the run that started it crashed or was hard-killed, leaving the
+ * server orphaned. Such orphans otherwise linger and contend with the next run
+ * (CPU/memory), which manifests as hangs or OOM kills. A running server with a
+ * live owner (a genuine concurrent run) — or no owner marker at all — is always
+ * left alone.
  */
 export async function sweepOrphanedDataDirs(
   minAgeMs: number = ORPHAN_MIN_AGE_MS,
@@ -563,11 +604,11 @@ export async function sweepOrphanedDataDirs(
         }
 
         if (pid !== null) {
+          let postmasterAlive = false;
           try {
             // Signal 0 just checks whether the process exists.
             process.kill(pid, 0);
-            // Process is alive — leave it alone, regardless of age.
-            return;
+            postmasterAlive = true;
           } catch (err) {
             const code = (err as NodeJS.ErrnoException).code;
             if (code === "EPERM") {
@@ -575,6 +616,33 @@ export async function sweepOrphanedDataDirs(
               return;
             }
             // ESRCH or anything else means the process is dead.
+          }
+
+          if (postmasterAlive) {
+            // A live postgres. Reclaim it only if its owning Node process is
+            // gone (crashed / hard-killed run → orphan). A live owner means a
+            // concurrent run; a missing marker means we can't tell — both are
+            // left strictly alone.
+            let ownerPid: number | null = null;
+            try {
+              const raw = await fs.readFile(path.join(fullPath, OWNER_PID_FILE), "utf8");
+              const parsed = parseInt(raw.trim(), 10);
+              if (!Number.isNaN(parsed) && parsed > 0) ownerPid = parsed;
+            } catch {
+              // no owner marker
+            }
+
+            if (ownerPid === null || isProcessAlive(ownerPid)) {
+              return;
+            }
+
+            // Orphan confirmed: kill the postmaster (its backends exit once the
+            // postmaster is gone), then fall through to reclaim the data dir.
+            try {
+              process.kill(pid, "SIGKILL");
+            } catch {
+              // already gone / not permitted — reclaim the dir regardless
+            }
           }
         }
 

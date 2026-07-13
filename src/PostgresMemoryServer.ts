@@ -23,6 +23,7 @@ import {
   installParadeDBExtension,
   installPgVectorExtension,
   sweepOrphanedDataDirs,
+  writeOwnerPidFile,
 } from "./native.js";
 import type {
   PostgresConnectionOptions,
@@ -153,6 +154,10 @@ export class PostgresMemoryServer {
       if (normalized.database !== "postgres") {
         await pg.createDatabase(normalized.database);
       }
+
+      // Record the owning process so a later run's orphan sweep can distinguish
+      // this instance (if it gets hard-killed) from a live concurrent run.
+      await writeOwnerPidFile(dataDir);
 
       const server = new PostgresMemoryServer(pg, port, dataDir, normalized);
       liveInstances.add(server);
